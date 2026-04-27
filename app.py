@@ -35,6 +35,7 @@ ZHIPU_MODEL = os.getenv("ZHIPU_MODEL", "glm-4-flash-250414")
 ZHIPU_TIMEOUT = float(os.getenv("ZHIPU_TIMEOUT", "45"))
 ENABLE_WEB_FALLBACK = os.getenv("ENABLE_WEB_FALLBACK", "true").lower() in {"1", "true", "yes", "on"}
 WEB_SEARCH_COUNT = int(os.getenv("WEB_SEARCH_COUNT", "5"))
+WEB_SEARCH_RELEVANCE_MIN = float(os.getenv("WEB_SEARCH_RELEVANCE_MIN", "2.0"))
 
 LOCAL_MIN_SAMPLES = int(os.getenv("LOCAL_MIN_SAMPLES", "3"))
 LOCAL_MATCH_SCORE_THRESHOLD = float(os.getenv("LOCAL_MATCH_SCORE_THRESHOLD", "5.5"))
@@ -608,6 +609,192 @@ def call_zhipu(messages: List[Dict[str, str]], tools: Optional[List[Dict[str, An
         return "", [], f"智谱 API 调用异常：{exc}"
 
 
+
+
+def build_target_search_query(query: Dict[str, Any], target: str) -> str:
+    """构造给智谱 Web Search API 的短检索式。
+
+    关键点：不要把“本地数据库不足/联网兜底”等系统词放进搜索式，
+    否则搜索引擎容易跑偏到数据库连接、MySQL、网站开发等无关内容。
+    智谱 Web Search API 建议 search_query 不超过 70 个字符。
+    """
+    target_queries = {
+        "mu_ref": "LDPE melt viscosity temperature shear rate rheology",
+        "A": "LDPE melt Arrhenius viscosity model coefficient",
+        "E_mu": "LDPE melt viscosity activation energy Arrhenius",
+        "K": "LDPE melt power law viscosity consistency index",
+        "m": "LDPE melt power law viscosity exponent",
+        "rho": "LDPE melt density temperature pressure PVT",
+        "cp": "LDPE melt specific heat capacity DSC",
+        "k": "LDPE melt thermal conductivity temperature",
+    }
+    base = target_queries.get(target, "LDPE melt simulation material properties")
+
+    grade = str(query.get("grade") or "").strip()
+    vis_model = str(query.get("vis_model") or "").strip()
+    extra = []
+    if grade:
+        extra.append(grade.split()[0][:18])
+    if vis_model and target in {"mu_ref", "A", "E_mu", "K", "m"}:
+        extra.append(vis_model.split()[0][:18])
+
+    text = " ".join([base] + extra)
+    # 去掉容易导致跑偏的词，并限制长度。
+    for bad in ["本地", "数据库", "联网", "Fluent", "推荐", "解释", "不足", "兜底"]:
+        text = text.replace(bad, "")
+    text = re.sub(r"\s+", " ", text).strip()
+    return text[:70]
+
+
+def call_zhipu_web_search(search_query: str, count: Optional[int] = None) -> Tuple[List[Dict[str, Any]], Optional[str]]:
+    """直接调用智谱 /web_search 接口，避免由对话模型自行猜搜索词导致跑偏。"""
+    if not ZHIPU_API_KEY:
+        return [], "未配置 ZHIPU_API_KEY，已跳过联网检索。"
+    url = f"{ZHIPU_API_BASE}/web_search"
+    payload = {
+        "search_query": search_query,
+        "search_engine": "search_pro",
+        "search_intent": False,
+        "count": int(count or WEB_SEARCH_COUNT),
+        "search_recency_filter": "noLimit",
+        "content_size": "high",
+    }
+    try:
+        resp = requests.post(
+            url,
+            headers={"Authorization": f"Bearer {ZHIPU_API_KEY}", "Content-Type": "application/json"},
+            json=payload,
+            timeout=ZHIPU_TIMEOUT,
+        )
+        if resp.status_code >= 400:
+            return [], f"智谱联网检索失败：HTTP {resp.status_code}，{resp.text[:500]}"
+        data = resp.json()
+        results = data.get("search_result") or data.get("web_search") or []
+        if not isinstance(results, list):
+            results = []
+        return results, None
+    except Exception as exc:  # pragma: no cover - network dependent
+        return [], f"智谱联网检索异常：{exc}"
+
+
+def _text_contains_any(text: str, terms: Iterable[str]) -> bool:
+    t = text.lower()
+    return any(term.lower() in t for term in terms)
+
+
+def web_result_relevance_score(ref: Dict[str, Any], target: str) -> Tuple[float, List[str]]:
+    """给联网结果打相关性分，只保留 LDPE 熔体参数相关来源。"""
+    title = str(ref.get("title") or "")
+    content = str(ref.get("content") or ref.get("summary") or "")
+    media = str(ref.get("media") or "")
+    link = str(ref.get("link") or "")
+    text = " ".join([title, content, media, link]).lower()
+
+    blacklist = [
+        "mysql", "数据库连接", "连接不上", "本地数据库", "虚拟机", "worktile",
+        "csdn", "java", "python", "sql", "navicat", "localhost", "root用户",
+        "权限不足", "防火墙", "数据库服务", "host地址",
+    ]
+    reasons: List[str] = []
+    score = 0.0
+    if _text_contains_any(text, blacklist):
+        return -10.0, ["命中数据库/编程类无关词"]
+
+    polymer_terms = ["ldpe", "low density polyethylene", "low-density polyethylene", "低密度聚乙烯"]
+    pe_terms = ["polyethylene", "聚乙烯"]
+    if _text_contains_any(text, polymer_terms):
+        score += 2.0
+        reasons.append("含 LDPE/低密度聚乙烯")
+    elif _text_contains_any(text, pe_terms):
+        score += 0.8
+        reasons.append("含聚乙烯但未明确 LDPE")
+    else:
+        score -= 2.0
+        reasons.append("未出现 LDPE/聚乙烯关键词")
+
+    target_terms = {
+        "mu_ref": ["viscosity", "rheology", "rheological", "shear rate", "melt flow", "黏度", "粘度", "流变", "剪切率"],
+        "A": ["viscosity", "arrhenius", "coefficient", "黏度", "粘度", "阿伦尼乌斯", "系数"],
+        "E_mu": ["activation energy", "arrhenius", "viscosity", "活化能", "黏流活化能", "黏度"],
+        "K": ["power law", "consistency", "viscosity", "rheology", "幂律", "稠度", "黏度"],
+        "m": ["power law", "exponent", "viscosity", "rheology", "幂律", "指数", "黏度"],
+        "rho": ["density", "pvt", "specific volume", "密度", "比容"],
+        "cp": ["specific heat", "heat capacity", "dsc", "比热", "热容"],
+        "k": ["thermal conductivity", "导热", "热导率", "thermal properties"],
+    }.get(target, ["property", "properties", "参数"])
+    hits = [term for term in target_terms if term.lower() in text]
+    if hits:
+        score += min(3.0, 0.8 * len(hits))
+        reasons.append("命中目标参数词：" + ", ".join(hits[:4]))
+    else:
+        score -= 1.0
+        reasons.append("未命中目标参数词")
+
+    # 来源类型轻量加权：学术/数据/厂商资料优先，泛博客降权。
+    preferred = ["sciencedirect", "springer", "wiley", "tandfonline", "mdpi", "acs", "nist", "researchgate", "semanticscholar", "elsevier", "journal", "polymer", "rheol", "matweb", "campusplastics"]
+    if _text_contains_any(text, preferred):
+        score += 0.8
+        reasons.append("来源类型较适合参数检索")
+    return score, reasons
+
+
+def filter_web_results(results: List[Dict[str, Any]], target: str) -> Tuple[List[Dict[str, Any]], int]:
+    filtered: List[Dict[str, Any]] = []
+    rejected = 0
+    seen_links = set()
+    for idx, ref in enumerate(results, start=1):
+        if not isinstance(ref, dict):
+            rejected += 1
+            continue
+        score, reasons = web_result_relevance_score(ref, target)
+        link = str(ref.get("link") or "")
+        if link and link in seen_links:
+            rejected += 1
+            continue
+        if score >= WEB_SEARCH_RELEVANCE_MIN:
+            clean = dict(ref)
+            clean.setdefault("refer", f"ref_{len(filtered) + 1}")
+            clean["relevance_score"] = round(score, 2)
+            clean["relevance_reason"] = "；".join(reasons)
+            filtered.append(clean)
+            if link:
+                seen_links.add(link)
+        else:
+            rejected += 1
+    return filtered, rejected
+
+
+def build_web_explanation_prompt(query: Dict[str, Any], target: str, local: LocalResult, context_rows: List[Dict[str, Any]], web_results: List[Dict[str, Any]], search_query: str) -> List[Dict[str, str]]:
+    target_meta = TARGETS[target]
+    system = (
+        "你是 LDPE 熔体 Fluent 仿真参数的网络补充参考助手。"
+        "你只能依据用户提供的已过滤联网结果进行解释；不得自行编造来源、数值、DOI 或实验条件。"
+        "必须区分本地库与网络资料；网络资料不得自动入库，只能作为临时参考。"
+        "如果联网结果没有明确数值，只能做定性说明和检索建议。"
+    )
+    payload = {
+        "任务": "根据已过滤的联网搜索结果生成补充解释",
+        "实际检索式": search_query,
+        "目标参数": f"{target_meta['label']} ({target_meta['unit']})",
+        "用户工况": query,
+        "本地库不足原因": {
+            "sample_count": local.sample_count,
+            "max_score": round(local.max_score, 3),
+            "coverage": local.coverage,
+            "insufficiency_reasons": local.insufficiency_reasons,
+        },
+        "已过滤联网结果": web_results,
+        "本地相似样本摘要": context_rows,
+        "输出格式要求": [
+            "用中文输出，不超过 600 字。",
+            "分为：本地库判定、网络补充参考、使用限制。",
+            "引用网络结果时使用 ref 编号或标题。",
+            "不要把网络资料写成数据库已收录数据。",
+            "不要建议自动入库；必须提示人工核验单位、温度压力剪切率范围和来源可靠性。",
+        ],
+    }
+    return [{"role": "system", "content": system}, {"role": "user", "content": json.dumps(payload, ensure_ascii=False)}]
+
 def build_local_prompt(query: Dict[str, Any], target: str, local: LocalResult, context_rows: List[Dict[str, Any]]) -> List[Dict[str, str]]:
     target_meta = TARGETS[target]
     system = (
@@ -759,12 +946,34 @@ def recommend(query: Dict[str, Any]) -> Dict[str, Any]:
     web_explanation = ""
     web_results: List[Dict[str, Any]] = []
     web_error: Optional[str] = None
+    web_search_query = ""
+    web_rejected_count = 0
     should_web = ENABLE_WEB_FALLBACK and not local.sufficient
     if should_web:
-        web_messages, tools = build_web_prompt(query, target, local, context_rows)
-        web_explanation, web_results, web_error = call_zhipu(web_messages, tools=tools, max_tokens=1800)
-        if not web_explanation and not web_error:
-            web_explanation = "联网检索未返回可用补充内容。"
+        web_search_query = build_target_search_query(query, target)
+        raw_web_results, web_error = call_zhipu_web_search(web_search_query, count=WEB_SEARCH_COUNT)
+        web_results, web_rejected_count = filter_web_results(raw_web_results, target)
+        if web_results:
+            web_messages = build_web_explanation_prompt(query, target, local, context_rows, web_results, web_search_query)
+            web_explanation, _, explain_error = call_zhipu(web_messages, tools=None, max_tokens=1800)
+            if explain_error and not web_error:
+                web_error = explain_error
+            if not web_explanation:
+                titles = "；".join(str(r.get("refer") or i + 1) + " " + str(r.get("title") or "") for i, r in enumerate(web_results[:3]))
+                web_explanation = (
+                    f"本地库判定：当前工况未被本地库充分覆盖，已使用定向检索式“{web_search_query}”。"
+                    f"网络补充参考：检索返回 {len(web_results)} 条通过 LDPE/目标参数相关性过滤的来源：{titles}。"
+                    "使用限制：这些结果仅作临时参考，入库前需人工核验原文、单位、温度/压力/剪切率范围及版权合规性。"
+                )
+        else:
+            if web_error:
+                web_explanation = "联网检索调用失败，未获得可用于 LDPE 熔体参数的补充来源。"
+            else:
+                web_explanation = (
+                    f"已触发联网检索，检索式为“{web_search_query}”，但返回结果未通过 LDPE 熔体参数相关性过滤。"
+                    f"系统已剔除 {web_rejected_count} 条疑似无关网页，避免将数据库连接、编程问答或泛化网页误作为参数来源。"
+                    "建议改用更具体的关键词，如 LDPE melt viscosity rheology、LDPE melt density PVT、LDPE specific heat DSC 等重新检索。"
+                )
 
     return {
         "query": query,
@@ -806,8 +1015,10 @@ def recommend(query: Dict[str, Any]) -> Dict[str, Any]:
         "matched_rows": context_rows,
         "web": {
             "triggered": should_web,
+            "search_query": web_search_query,
             "explanation": web_explanation,
             "results": web_results,
+            "rejected_count": web_rejected_count,
             "error": web_error,
             "policy": "网络结果仅为临时补充参考，禁止自动入库；入库前需要人工核验来源、单位、工况范围和版权合规性。",
         },
@@ -998,6 +1209,7 @@ def health():
             "web_fallback_enabled": ENABLE_WEB_FALLBACK,
             "strict_range_coverage": STRICT_RANGE_COVERAGE,
             "local_min_joint_coverage": LOCAL_MIN_JOINT_COVERAGE,
+            "web_search_relevance_min": WEB_SEARCH_RELEVANCE_MIN,
         })
     except Exception as exc:
         return jsonify({"ok": False, "error": str(exc)}), 500
