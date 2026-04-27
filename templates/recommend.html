@@ -1,127 +1,337 @@
-{% extends 'base.html' %} {% block content %}
-AI 参数推荐与解释
-输入 Fluent 工况与应用场景后，系统先执行本地库匹配；样本不足时才触发联网补充参考。
+{% extends 'base.html' %}
 
-本地优先 / 网络兜底
-目标参数 
-{{ meta.label }} · {{ meta.unit }}
- 温度 T / ℃ 
- 压力 P / MPa 
- 剪切率 γ / s⁻¹ 
- LDPE 牌号/型号 
-{{ form_data.grade }}
- 限定黏度模型 
-不限
- 应用场景 
-{{ form_data.application_scene }}
- 试验方法 
-{{ form_data.experimental_method }}
- 设备或装置 
-{{ form_data.equipment_or_setup }}
- 通道形状 
-{{ form_data.channel_geometry }}
- 通道长度 
-{{ form_data.channel_length }}
- 通道直径或间隙 
-{{ form_data.channel_diameter }}
- 补充问题 
-{{ form_data.question }}
-生成推荐与解释
-{% if result %}
-本地推荐值
-{{ result.local.value_text }}
-{{ result.target_meta.unit }}
-本地匹配判定
-{{ '充分' if result.local.sufficient else '不足' }}
-样本 {{ result.local.sample_count }} · 最高分 {{ '%.2f'|format(result.local.max_score) }}
-{% if result.local.coverage and result.local.coverage.summary %}
-覆盖：{{ result.local.coverage.overall }} · 联合样本 {{ result.local.coverage.joint_coverage_count }}
+{% block content %}
+
+{% set fd = form_data if form_data is defined and form_data else {} %}
+
+<section class="card">
+    <div class="section-head">
+        <div>
+            <h2>AI 参数推荐与解释</h2>
+            <p>输入 Fluent 工况与应用场景后，系统先执行本地库匹配；本地样本不足时才触发联网补充参考。</p>
+        </div>
+        <span class="pill">本地优先 / 网络兜底</span>
+    </div>
+
+    <form method="post" class="recommend-form">
+        <label>目标参数
+            <select name="target">
+                {% if targets is defined and targets %}
+                    {% for key, meta in targets.items() %}
+                        <option value="{{ key }}" {% if fd.get('target', 'mu_ref') == key %}selected{% endif %}>
+                            {{ meta.get('label', key) }} · {{ meta.get('unit', '') }}
+                        </option>
+                    {% endfor %}
+                {% else %}
+                    <option value="mu_ref">参考黏度 mu_ref · Pa·s</option>
+                    <option value="rho">密度 rho · kg/m³</option>
+                    <option value="cp">比热 cp · J/(kg·K)</option>
+                    <option value="k">导热系数 k · W/(m·K)</option>
+                {% endif %}
+            </select>
+        </label>
+
+        <label>温度 T / ℃
+            <input type="number" step="any" name="temperature" value="{{ fd.get('temperature', '190') }}">
+        </label>
+
+        <label>压力 P / MPa
+            <input type="number" step="any" name="pressure" value="{{ fd.get('pressure', '1') }}">
+        </label>
+
+        <label>剪切率 γ / s⁻¹
+            <input type="number" step="any" name="shear_rate" value="{{ fd.get('shear_rate', '100') }}">
+        </label>
+
+        <label>LDPE 牌号/型号
+            <input type="text" name="grade" placeholder="如 2426H、LDPE 1840H、MFI..." value="{{ fd.get('grade', '') }}">
+        </label>
+
+        <label>限定黏度模型
+            <select name="vis_model">
+                <option value="">不限</option>
+                {% if vis_models is defined and vis_models %}
+                    {% for item in vis_models %}
+                        <option value="{{ item }}" {% if fd.get('vis_model', '') == item %}selected{% endif %}>{{ item }}</option>
+                    {% endfor %}
+                {% endif %}
+            </select>
+        </label>
+
+        <label>应用场景
+            <input type="text" name="application_scene" value="{{ fd.get('application_scene', 'LDPE 熔体管道输送 Fluent 非等温流动') }}">
+        </label>
+
+        <label>试验方法
+            <input type="text" name="experimental_method" placeholder="毛细管流变/DSC/PVT/文献拟合..." value="{{ fd.get('experimental_method', '') }}">
+        </label>
+
+        <label>设备或装置
+            <input type="text" name="equipment_or_setup" placeholder="毛细管流变仪/管道/挤出机..." value="{{ fd.get('equipment_or_setup', '') }}">
+        </label>
+
+        <label>通道形状
+            <input type="text" name="channel_geometry" placeholder="圆管/平板/环隙/毛细管..." value="{{ fd.get('channel_geometry', '圆管') }}">
+        </label>
+
+        <label>通道长度
+            <input type="text" name="channel_length" placeholder="可填数值或带单位说明" value="{{ fd.get('channel_length', '') }}">
+        </label>
+
+        <label>通道直径或间隙
+            <input type="text" name="channel_diameter" placeholder="可填数值或带单位说明" value="{{ fd.get('channel_diameter', '') }}">
+        </label>
+
+        <label class="span-3">补充问题
+            <textarea name="question" rows="3">{{ fd.get('question', '请推荐该工况下可用于 Fluent 的 LDPE 熔体参数，并说明是否需要联网补充。') }}</textarea>
+        </label>
+
+        <div class="form-submit">
+            <button type="submit">生成推荐与解释</button>
+        </div>
+    </form>
+</section>
+
+{% if result is defined and result %}
+
+    {% set local = result.get('local', {}) %}
+    {% set web = result.get('web', {}) %}
+    {% set config = result.get('config', {}) %}
+    {% set target_meta = result.get('target_meta', {}) %}
+    {% set prediction_methods = result.get('prediction_methods', {}) %}
+    {% set rule = prediction_methods.get('rule_weighted', {}) %}
+    {% set knn_method = prediction_methods.get('knn') %}
+
+    <section class="grid-3">
+        <div class="metric card">
+            <div class="metric-label">本地推荐值</div>
+            <div class="metric-value">{{ local.get('value_text', '-') }}</div>
+            <div class="metric-unit">{{ target_meta.get('unit', '') }}</div>
+        </div>
+
+        <div class="metric card">
+            <div class="metric-label">本地匹配判定</div>
+            <div class="metric-value status {% if local.get('sufficient') %}ok{% else %}warn{% endif %}">
+                {% if local.get('sufficient') %}
+                    充分
+                {% else %}
+                    不足
+                {% endif %}
+            </div>
+            <div class="metric-unit">
+                样本 {{ local.get('sample_count', 0) }} · 最高分 {{ local.get('max_score', 0) }}
+            </div>
+
+            {% if local.get('coverage') %}
+                {% set coverage = local.get('coverage') %}
+                <div class="metric-unit">
+                    工况覆盖：{{ coverage.get('overall', '-') }} · 联合覆盖样本 {{ coverage.get('joint_coverage_count', 0) }}
+                </div>
+            {% endif %}
+        </div>
+
+        <div class="metric card">
+            <div class="metric-label">联网检索</div>
+            <div class="metric-value status {% if web.get('triggered') %}warn{% else %}ok{% endif %}">
+                {% if web.get('triggered') %}
+                    已触发
+                {% else %}
+                    未触发
+                {% endif %}
+            </div>
+            <div class="metric-unit">
+                模型 {{ config.get('model', '-') }}
+            </div>
+        </div>
+    </section>
+
+    <section class="card">
+        <div class="section-head">
+            <div>
+                <h3>两种原始预测方法</h3>
+                <p>AI 只负责解释、联网补充和结果说明，不替代原有预测算法。</p>
+            </div>
+            <span class="pill">算法预测结果</span>
+        </div>
+
+        <section class="grid-2 no-margin">
+            <div class="method-panel">
+                <span class="tagline">方法 1</span>
+                <h3>{{ rule.get('name', '方法1：规则加权推荐') }}</h3>
+                <div class="big-number">{{ rule.get('value_text', '-') }}</div>
+                <p class="metric-unit">{{ target_meta.get('unit', '') }}</p>
+                <p>
+                    {{ rule.get('description', '根据温度、压力、剪切率匹配程度，综合数据质量评分和置信等级计算加权平均值。') }}
+                </p>
+                <p class="subtle">
+                    参与样本 {{ rule.get('sample_count', 0) }}；
+                    最高匹配分 {{ rule.get('max_score', 0) }}。
+                </p>
+            </div>
+
+            <div class="method-panel">
+                <span class="tagline">方法 2</span>
+                {% if knn_method %}
+                    <h3>{{ knn_method.get('name', '方法2：KNN 相似案例推荐') }}</h3>
+                    <div class="big-number">{{ knn_method.get('value_text', '-') }}</div>
+                    <p class="metric-unit">{{ target_meta.get('unit', '') }}</p>
+                    <p>
+                        {{ knn_method.get('description', '找到最相似的历史工况，基于邻近数据进行预测。') }}
+                    </p>
+                    <p class="subtle">{{ knn_method.get('note', '') }}</p>
+                {% else %}
+                    <h3>方法2：KNN 相似案例推荐</h3>
+                    <div class="big-number">-</div>
+                    <p class="metric-unit">{{ target_meta.get('unit', '') }}</p>
+                    <p>样本量不足或目标字段缺少有效数值，本次未启用 KNN。</p>
+                {% endif %}
+            </div>
+        </section>
+    </section>
+
+    <section class="grid-2">
+        <div class="card accent-left">
+            <h3>本地数据库推荐解释</h3>
+
+            {% if local.get('explanation') %}
+                <div class="markdown-like">
+                    {{ local.get('explanation') | replace('\n', '<br>') | safe }}
+                </div>
+            {% else %}
+                <p class="subtle">暂无本地解释。</p>
+            {% endif %}
+
+            {% if local.get('insufficiency_reasons') %}
+                <div class="notice-box">
+                    <strong>本地不足 / 触发联网原因</strong>
+                    <ul>
+                        {% for item in local.get('insufficiency_reasons', []) %}
+                            <li>{{ item }}</li>
+                        {% endfor %}
+                    </ul>
+                </div>
+            {% endif %}
+
+            {% if local.get('coverage') %}
+                {% set coverage = local.get('coverage') %}
+                {% if coverage.get('dimension_reports') %}
+                    <div class="mini-table">
+                        {% for item in coverage.get('dimension_reports', []) %}
+                            <div class="kv">
+                                <strong>{{ item.get('field', '-') }}</strong>
+                                <span>{{ item.get('message', '-') }}</span>
+                            </div>
+                        {% endfor %}
+                    </div>
+                {% endif %}
+            {% endif %}
+
+            {% if local.get('error') %}
+                <p class="error-text">{{ local.get('error') }}</p>
+            {% endif %}
+        </div>
+
+        <div class="card accent-left web">
+            <h3>网络补充参考</h3>
+
+            {% if web.get('triggered') %}
+
+                {% if web.get('search_query') %}
+                    <p class="subtle">
+                        实际检索式：{{ web.get('search_query') }}
+                        {% if web.get('rejected_count') %}
+                            ；已过滤无关结果 {{ web.get('rejected_count') }} 条
+                        {% endif %}
+                    </p>
+                {% endif %}
+
+                {% if web.get('explanation') %}
+                    <div class="markdown-like">
+                        {{ web.get('explanation') | replace('\n', '<br>') | safe }}
+                    </div>
+                {% else %}
+                    <p class="subtle">已触发联网检索，但未获得可展示的有效补充解释。</p>
+                {% endif %}
+
+                {% if web.get('policy') %}
+                    <p class="subtle">{{ web.get('policy') }}</p>
+                {% endif %}
+
+                {% if web.get('error') %}
+                    <p class="error-text">{{ web.get('error') }}</p>
+                {% endif %}
+
+            {% else %}
+                <p>
+                    本地样本达到样本数、匹配分与工况覆盖阈值，本次不触发网络检索，
+                    避免把临时网络资料混入本地数据库结论。
+                </p>
+            {% endif %}
+        </div>
+    </section>
+
+    <section class="card">
+        <div class="section-head">
+            <h3>相似样本与有效字段</h3>
+            <span>空值字段已自动过滤</span>
+        </div>
+
+        <div class="sample-grid">
+            {% if result.get('matched_rows') %}
+                {% for row in result.get('matched_rows', []) %}
+                    <div class="sample-card">
+                        {% for k, v in row.items() %}
+                            <div class="kv">
+                                <strong>{{ k }}</strong>
+                                <span>{{ v }}</span>
+                            </div>
+                        {% endfor %}
+                    </div>
+                {% endfor %}
+            {% else %}
+                <p class="subtle">暂无相似样本展示。</p>
+            {% endif %}
+        </div>
+    </section>
+
+    {% if web.get('results') %}
+        <section class="card">
+            <h3>联网搜索返回来源</h3>
+
+            <div class="refs">
+                {% for ref in web.get('results', []) %}
+                    <div class="ref-card">
+                        <div>
+                            <strong>{{ ref.get('refer', loop.index) }}</strong>
+                            ·
+                            {{ ref.get('title', '-') }}
+                        </div>
+
+                        <small>
+                            {{ ref.get('media', '') }}
+                            {{ ref.get('publish_date', '') }}
+                            {% if ref.get('relevance_score') %}
+                                · 相关性 {{ ref.get('relevance_score') }}
+                            {% endif %}
+                        </small>
+
+                        {% if ref.get('relevance_reason') %}
+                            <p class="subtle">筛选依据：{{ ref.get('relevance_reason') }}</p>
+                        {% endif %}
+
+                        {% if ref.get('content') %}
+                            <p>{{ ref.get('content') }}</p>
+                        {% endif %}
+
+                        {% if ref.get('link') %}
+                            <a href="{{ ref.get('link') }}" target="_blank" rel="noopener">打开来源</a>
+                        {% endif %}
+                    </div>
+                {% endfor %}
+            </div>
+        </section>
+    {% endif %}
+
 {% endif %}
-联网检索
-{{ '已触发' if result.web.triggered else '未触发' }}
-模型 {{ result.config.model }}
-两种原始预测方法
-AI 解释层不会替代原有预测算法；下面分别保留规则加权推荐和 KNN 相似案例推荐结果。
 
-算法预测结果
-方法 1
-{{ result.prediction_methods.rule_weighted.name }}
-{{ result.prediction_methods.rule_weighted.value_text }}
-{{ result.target_meta.unit }}
-
-{{ result.prediction_methods.rule_weighted.description }}
-
-参与样本 {{ result.prediction_methods.rule_weighted.sample_count }}；最高匹配分 {{ '%.2f'|format(result.prediction_methods.rule_weighted.max_score) }}。
-
-方法 2 {% if result.prediction_methods.knn %}
-{{ result.prediction_methods.knn.name }}
-{{ result.prediction_methods.knn.value_text }}
-{{ result.target_meta.unit }}
-
-{{ result.prediction_methods.knn.description }}
-
-{{ result.prediction_methods.knn.note }}
-
-{% else %}
-方法2：KNN 相似案例推荐
--
-{{ result.target_meta.unit }}
-
-样本量不足或目标字段缺少有效数值，本次未启用 KNN。
-
-{% endif %}
-本地数据库推荐解释
-{{ result.local.explanation | replace('\n', '
-') | safe }}
-{% if result.knn %}
-KNN 辅助预测：{{ result.knn.value_text }} {{ result.target_meta.unit }}。{{ result.knn.note }}
-
-{% endif %} {% if result.local.insufficiency_reasons %}
-本地不足/触发联网原因
-{% for item in result.local.insufficiency_reasons %}
-{{ item }}
-{% endfor %}
-{% endif %} {% if result.local.coverage and result.local.coverage.dimension_reports %}
-{% for item in result.local.coverage.dimension_reports %}
-{{ item.field }}{{ item.message }}
-{% endfor %}
-{% endif %} {% if result.local.error %}
-{{ result.local.error }}
-
-{% endif %}
-网络补充参考
-{% if result.web.triggered %} {% if result.web.search_query %}
-实际检索式：{{ result.web.search_query }}{% if result.web.rejected_count %}；已过滤无关结果 {{ result.web.rejected_count }} 条{% endif %}
-
-{% endif %}
-{{ result.web.explanation | replace('\n', '
-') | safe }}
-{{ result.web.policy }}
-
-{% if result.web.error %}
-{{ result.web.error }}
-
-{% endif %} {% else %}
-本地样本达到样本数、匹配分与工况覆盖阈值，本次不触发网络检索，避免把临时网络资料混入本地数据库结论。
-
-{% endif %}
-相似样本与有效字段
-空值字段已自动过滤
-{% for row in result.matched_rows %}
-{% for k, v in row.items() %}
-{{ k }}{{ v }}
-{% endfor %}
-{% endfor %}
-{% if result.web.results %}
-联网搜索返回来源
-{% for ref in result.web.results %}
-{{ ref.refer or loop.index }} · {{ ref.title }}
-{{ ref.media }} {{ ref.publish_date }}{% if ref.relevance_score %} · 相关性 {{ ref.relevance_score }}{% endif %} {% if ref.relevance_reason %}
-筛选依据：{{ ref.relevance_reason }}
-
-{% endif %}
-{{ ref.content }}
-
-{% if ref.link %}打开来源{% endif %}
-{% endfor %}
-{% endif %} {% endif %} {% endblock %}
+{% endblock %}
