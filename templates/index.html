@@ -1,26 +1,84 @@
-{% extends 'base.html' %} {% block content %}
-Public-ready LDPE parameter website
+{% extends 'base.html' %}
 
-面向 LDPE 熔体 Fluent 仿真的参数数据库与大模型解释原型
-系统先检索本地 LDPE 参数库，根据匹配分与样本数量判断可信度；本地相近样本不足时，再调用智谱 GLM 的联网检索能力给出临时补充参考，且网络结果不自动入库。
+{% block content %}
+<section class="hero card">
+    <div>
+        <p class="eyebrow">LDPE Fluent Parameter Database</p>
+        <h2>面向 LDPE 熔体 Fluent 仿真的参数数据库与智能推荐平台</h2>
+        <p class="lead">
+            本网站用于整理、查询和推荐 LDPE 熔体 Fluent 数值模拟所需的热物性参数、流变参数及温度依赖黏度模型参数。
+        </p>
+        <div class="hero-actions">
+            <a class="btn" href="{{ url_for('recommend_page') }}">开始 AI 参数推荐</a>
+            <a class="btn secondary" href="{{ url_for('predict_page') }}">参数预测</a>
+            <a class="btn secondary" href="{{ url_for('database') }}">浏览参数库</a>
+        </div>
+    </div>
+</section>
 
-开始 AI 参数推荐 浏览参数库
-两级智能解释机制
-本地优先：按 T/P/剪切率/应用场景/质量评分计算匹配。
-阈值判断：样本数与最高匹配分同时达标才视为本地充分。
-联网兜底：不足时调用 web_search，仅展示临时补充来源。
-严谨输出：缺失字段静默不提，禁止编造，分区展示。
-{{ summary.total_records }}
-参数记录数
-{{ summary.sources }}
-来源数
-{{ summary.vis_models|length }}
-黏度模型数
-{{ summary.temp_range }}
-温度覆盖范围
-数据库预览
-展示前 10 条记录
-{% for row in latest %} {% endfor %}
-参数编号	材料	牌号/说明	详细牌号	温度范围	mu_ref	模型	质量分
-{{ row.param_id }}	{{ row.material_name }}	{{ row.grade_or_mfi }}	{{ row.ldpe_grade_detail }}	{{ format_number(row.T_min) }} ~ {{ format_number(row.T_max) }} ℃	{{ format_number(row.mu_ref) }}	{{ row.vis_model }}	{{ format_number(row.quality_score) }}
+<section class="grid-4">
+    <div class="stat card">
+        <div class="num">{{ summary.total_records | default(0) }}</div>
+        <div>参数记录数</div>
+    </div>
+    <div class="stat card">
+        <div class="num">{{ summary.sources | default(0) }}</div>
+        <div>来源数</div>
+    </div>
+    <div class="stat card">
+        <div class="num">{{ summary.vis_models | length if summary.vis_models is defined else 0 }}</div>
+        <div>黏度模型数</div>
+    </div>
+    <div class="stat card">
+        <div class="num small">{{ summary.temp_range | default('-') }}</div>
+        <div>温度覆盖范围</div>
+    </div>
+</section>
+
+<section class="card">
+    <div class="section-head">
+        <h3>数据库预览</h3>
+        <span>展示前 10 条记录</span>
+    </div>
+
+    <div class="table-wrap">
+        <table>
+            <thead>
+                <tr>
+                    <th>参数编号</th>
+                    <th>材料</th>
+                    <th>牌号/说明</th>
+                    <th>详细牌号</th>
+                    <th>温度范围</th>
+                    <th>mu_ref</th>
+                    <th>模型</th>
+                    <th>质量分</th>
+                </tr>
+            </thead>
+            <tbody>
+            {% for row in latest %}
+                <tr>
+                    <td>{{ row.get('param_id', '-') }}</td>
+                    <td>{{ row.get('material_name', '-') }}</td>
+                    <td>{{ row.get('grade_or_mfi', '-') }}</td>
+                    <td>{{ row.get('ldpe_grade_detail', '-') }}</td>
+                    <td>
+                        {{ format_number(row.get('T_min', '-')) }}
+                        ~
+                        {{ format_number(row.get('T_max', '-')) }}
+                        ℃
+                    </td>
+                    <td>{{ format_number(row.get('mu_ref', '-')) }}</td>
+                    <td>{{ row.get('vis_model', '-') }}</td>
+                    <td>{{ format_number(row.get('quality_score', '-')) }}</td>
+                </tr>
+            {% else %}
+                <tr>
+                    <td colspan="8">暂无数据库记录。</td>
+                </tr>
+            {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</section>
 {% endblock %}
