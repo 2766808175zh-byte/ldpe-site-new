@@ -1,0 +1,193 @@
+{% extends 'base.html' %}
+{% block content %}
+<section class="card">
+    <div class="section-head">
+        <div>
+            <h2>AI 参数推荐与解释</h2>
+            <p>输入 Fluent 工况与应用场景后，系统先执行本地库匹配；样本不足时才触发联网补充参考。</p>
+        </div>
+        <span class="pill">本地优先 / 网络兜底</span>
+    </div>
+    <form method="post" class="recommend-form">
+        <label>目标参数
+            <select name="target">
+                {% for key, meta in targets.items() %}
+                    <option value="{{ key }}" {% if form_data.target == key %}selected{% endif %}>{{ meta.label }} · {{ meta.unit }}</option>
+                {% endfor %}
+            </select>
+        </label>
+        <label>温度 T / ℃
+            <input type="number" step="any" name="temperature" value="{{ form_data.temperature }}">
+        </label>
+        <label>压力 P / MPa
+            <input type="number" step="any" name="pressure" value="{{ form_data.pressure }}">
+        </label>
+        <label>剪切率 γ / s⁻¹
+            <input type="number" step="any" name="shear_rate" value="{{ form_data.shear_rate }}">
+        </label>
+        <label>LDPE 牌号/型号
+            <input type="text" name="grade" placeholder="如 2426H、LDPE 1840H、MFI..." value="{{ form_data.grade }}">
+        </label>
+        <label>限定黏度模型
+            <select name="vis_model">
+                <option value="">不限</option>
+                {% for item in vis_models %}
+                    <option value="{{ item }}" {% if form_data.vis_model == item %}selected{% endif %}>{{ item }}</option>
+                {% endfor %}
+            </select>
+        </label>
+        <label>应用场景
+            <input type="text" name="application_scene" value="{{ form_data.application_scene }}">
+        </label>
+        <label>试验方法
+            <input type="text" name="experimental_method" placeholder="毛细管流变/DSC/PVT/文献拟合..." value="{{ form_data.experimental_method }}">
+        </label>
+        <label>设备或装置
+            <input type="text" name="equipment_or_setup" placeholder="毛细管流变仪/管道/挤出机..." value="{{ form_data.equipment_or_setup }}">
+        </label>
+        <label>通道形状
+            <input type="text" name="channel_geometry" placeholder="圆管/平板/环隙/毛细管..." value="{{ form_data.channel_geometry }}">
+        </label>
+        <label>通道长度
+            <input type="text" name="channel_length" placeholder="可填数值或带单位说明" value="{{ form_data.channel_length }}">
+        </label>
+        <label>通道直径或间隙
+            <input type="text" name="channel_diameter" placeholder="可填数值或带单位说明" value="{{ form_data.channel_diameter }}">
+        </label>
+        <label class="span-3">补充问题
+            <textarea name="question" rows="3">{{ form_data.question }}</textarea>
+        </label>
+        <div class="form-submit">
+            <button type="submit">生成推荐与解释</button>
+        </div>
+    </form>
+</section>
+
+{% if result %}
+<section class="grid-3">
+    <div class="metric card">
+        <div class="metric-label">本地推荐值</div>
+        <div class="metric-value">{{ result.local.value_text }}</div>
+        <div class="metric-unit">{{ result.target_meta.unit }}</div>
+    </div>
+    <div class="metric card">
+        <div class="metric-label">本地匹配判定</div>
+        <div class="metric-value status {{ 'ok' if result.local.sufficient else 'warn' }}">{{ '充分' if result.local.sufficient else '不足' }}</div>
+        <div class="metric-unit">样本 {{ result.local.sample_count }} · 最高分 {{ '%.2f'|format(result.local.max_score) }}</div>
+        {% if result.local.coverage and result.local.coverage.summary %}
+            <div class="metric-unit">覆盖：{{ result.local.coverage.overall }} · 联合样本 {{ result.local.coverage.joint_coverage_count }}</div>
+        {% endif %}
+    </div>
+    <div class="metric card">
+        <div class="metric-label">联网检索</div>
+        <div class="metric-value status {{ 'warn' if result.web.triggered else 'ok' }}">{{ '已触发' if result.web.triggered else '未触发' }}</div>
+        <div class="metric-unit">模型 {{ result.config.model }}</div>
+    </div>
+</section>
+
+<section class="card">
+    <div class="section-head">
+        <div>
+            <h3>两种原始预测方法</h3>
+            <p>AI 解释层不会替代原有预测算法；下面分别保留规则加权推荐和 KNN 相似案例推荐结果。</p>
+        </div>
+        <span class="pill">算法预测结果</span>
+    </div>
+    <section class="grid-2 no-margin">
+        <div class="method-panel">
+            <span class="tagline">方法 1</span>
+            <h3>{{ result.prediction_methods.rule_weighted.name }}</h3>
+            <div class="big-number">{{ result.prediction_methods.rule_weighted.value_text }}</div>
+            <p class="metric-unit">{{ result.target_meta.unit }}</p>
+            <p>{{ result.prediction_methods.rule_weighted.description }}</p>
+            <p class="subtle">参与样本 {{ result.prediction_methods.rule_weighted.sample_count }}；最高匹配分 {{ '%.2f'|format(result.prediction_methods.rule_weighted.max_score) }}。</p>
+        </div>
+        <div class="method-panel">
+            <span class="tagline">方法 2</span>
+            {% if result.prediction_methods.knn %}
+                <h3>{{ result.prediction_methods.knn.name }}</h3>
+                <div class="big-number">{{ result.prediction_methods.knn.value_text }}</div>
+                <p class="metric-unit">{{ result.target_meta.unit }}</p>
+                <p>{{ result.prediction_methods.knn.description }}</p>
+                <p class="subtle">{{ result.prediction_methods.knn.note }}</p>
+            {% else %}
+                <h3>方法2：KNN 相似案例推荐</h3>
+                <div class="big-number">-</div>
+                <p class="metric-unit">{{ result.target_meta.unit }}</p>
+                <p>样本量不足或目标字段缺少有效数值，本次未启用 KNN。</p>
+            {% endif %}
+        </div>
+    </section>
+</section>
+
+<section class="grid-2">
+    <div class="card accent-left">
+        <h3>本地数据库推荐解释</h3>
+        <div class="markdown-like">{{ result.local.explanation | replace('\n', '<br>') | safe }}</div>
+        {% if result.knn %}
+            <p class="subtle">KNN 辅助预测：{{ result.knn.value_text }} {{ result.target_meta.unit }}。{{ result.knn.note }}</p>
+        {% endif %}
+        {% if result.local.insufficiency_reasons %}
+            <div class="notice-box">
+                <strong>本地不足/触发联网原因</strong>
+                <ul>
+                    {% for item in result.local.insufficiency_reasons %}
+                        <li>{{ item }}</li>
+                    {% endfor %}
+                </ul>
+            </div>
+        {% endif %}
+        {% if result.local.coverage and result.local.coverage.dimension_reports %}
+            <div class="mini-table">
+                {% for item in result.local.coverage.dimension_reports %}
+                    <div class="kv"><strong>{{ item.field }}</strong><span>{{ item.message }}</span></div>
+                {% endfor %}
+            </div>
+        {% endif %}
+        {% if result.local.error %}<p class="error-text">{{ result.local.error }}</p>{% endif %}
+    </div>
+    <div class="card accent-left web">
+        <h3>网络补充参考</h3>
+        {% if result.web.triggered %}
+            <div class="markdown-like">{{ result.web.explanation | replace('\n', '<br>') | safe }}</div>
+            <p class="subtle">{{ result.web.policy }}</p>
+            {% if result.web.error %}<p class="error-text">{{ result.web.error }}</p>{% endif %}
+        {% else %}
+            <p>本地样本达到样本数、匹配分与工况覆盖阈值，本次不触发网络检索，避免把临时网络资料混入本地数据库结论。</p>
+        {% endif %}
+    </div>
+</section>
+
+<section class="card">
+    <div class="section-head">
+        <h3>相似样本与有效字段</h3>
+        <span>空值字段已自动过滤</span>
+    </div>
+    <div class="sample-grid">
+        {% for row in result.matched_rows %}
+            <div class="sample-card">
+                {% for k, v in row.items() %}
+                    <div class="kv"><strong>{{ k }}</strong><span>{{ v }}</span></div>
+                {% endfor %}
+            </div>
+        {% endfor %}
+    </div>
+</section>
+
+{% if result.web.results %}
+<section class="card">
+    <h3>联网搜索返回来源</h3>
+    <div class="refs">
+        {% for ref in result.web.results %}
+            <div class="ref-card">
+                <div><strong>{{ ref.refer or loop.index }}</strong> · {{ ref.title }}</div>
+                <small>{{ ref.media }} {{ ref.publish_date }}</small>
+                <p>{{ ref.content }}</p>
+                {% if ref.link %}<a href="{{ ref.link }}" target="_blank" rel="noopener">打开来源</a>{% endif %}
+            </div>
+        {% endfor %}
+    </div>
+</section>
+{% endif %}
+{% endif %}
+{% endblock %}

@@ -1,0 +1,19 @@
+{% extends 'base.html' %}
+{% block content %}
+<section class="card narrow">
+    <h2>更新 Excel 数据库</h2>
+    <p>公共部署环境建议启用上传口令，避免任何访问者替换数据库。请在平台环境变量中设置 <code>ADMIN_UPLOAD_TOKEN</code>。</p>
+    {% if not upload_enabled %}
+        <div class="notice warn">当前未配置上传口令，上传入口处于保护状态。你仍可通过重新部署或服务器文件管理方式更新 Excel。</div>
+    {% endif %}
+    <form method="post" enctype="multipart/form-data" class="upload-form">
+        <label>上传口令
+            <input type="password" name="token" placeholder="ADMIN_UPLOAD_TOKEN">
+        </label>
+        <label>Excel 文件
+            <input type="file" name="file" accept=".xlsx,.xls">
+        </label>
+        <button type="submit">上传并替换数据库</button>
+    </form>
+</section>
+{% endblock %}
