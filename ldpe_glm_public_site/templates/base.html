@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>{{ title if title else app_title }}</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+<header class="topbar">
+    <div class="container nav-wrap">
+        <div class="brand">
+            <div class="brand-badge">LDPE-AI</div>
+            <div>
+                <h1>{{ app_title }}</h1>
+                <p>本地数据库优先 · 智谱 GLM-4-Flash 解释 · 联网检索兜底 · 可追溯参数调用</p>
+            </div>
+        </div>
+        <nav>
+            <a href="{{ url_for('index') }}">首页</a>
+            <a href="{{ url_for('database') }}">参数库</a>
+            <a href="{{ url_for('predict_page') }}">参数预测</a>
+            <a href="{{ url_for('recommend_page') }}">AI 推荐</a>
+            <a href="{{ url_for('upload') }}">更新数据库</a>
+            <a href="{{ url_for('about') }}">说明</a>
+        </nav>
+    </div>
+</header>
+
+<main class="container">
+    {% with messages = get_flashed_messages(with_categories=true) %}
+        {% if messages %}
+            {% for category, msg in messages %}
+                <div class="flash {{ category }}">{{ msg }}</div>
+            {% endfor %}
+        {% endif %}
+    {% endwith %}
+    {% block content %}{% endblock %}
+</main>
+
+<footer class="footer">
+    <div class="container footer-grid">
+        <div>© LDPE 参数推荐原型 · 用于 Fluent 非等温熔体输送仿真参数规范化调用</div>
+        <div>模型：{{ zhipu_model }} · API Key：{{ '已配置' if api_key_ready else '未配置' }}</div>
+    </div>
+</footer>
+</body>
+</html>
